@@ -434,7 +434,8 @@ public class ProducerPerformance {
             long startMs = System.currentTimeMillis();
             ThroughputThrottler throttler = new ThroughputThrottler(throughput, startMs);
             int messagesSinceLastMetricRecord = 0;
-            int metricStatsInterval = (int) numRecords / 10;
+            int metricStatsInterval = (int) numRecords / 20;
+            int skipMessagesForMetricSampling = (int) numRecords / 2;
             for (int i = 0; i < numRecords; i++) {
                 byte[] payload = newPayload();
                 ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(topicName, payload);
@@ -442,7 +443,7 @@ public class ProducerPerformance {
                 Callback cb = threadStats.nextCompletion(sendStartMs, payload.length, threadStats);
                 producer.send(record, cb);
 
-                if (metricStats != null) {
+                if (metricStats != null && i >= skipMessagesForMetricSampling) {
                     messagesSinceLastMetricRecord++;
                     if (messagesSinceLastMetricRecord > metricStatsInterval) {
                         metricStats.recordMetricStats();
