@@ -155,7 +155,7 @@ class ProducerPerformanceService(JmxMixin, PerformanceService):
         last = None
         producer_output = node.account.ssh_capture("cat %s" % ProducerPerformanceService.STDOUT_CAPTURE)
         for line in producer_output:
-            if self.intermediate_stats:
+            if self.intermediate_stats and (',' in line):
                 try:
                     self.stats[idx-1].append(self.parse_stats(line))
                 except:
