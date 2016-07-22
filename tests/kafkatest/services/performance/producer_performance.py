@@ -162,8 +162,7 @@ class ProducerPerformanceService(JmxMixin, PerformanceService):
                     # Sometimes there are extraneous log messages
                     pass
 
-            if ',' in line:
-                last = line
+            last = line
         try:
             self.results[idx-1] = self.parse_stats(last)
         except:

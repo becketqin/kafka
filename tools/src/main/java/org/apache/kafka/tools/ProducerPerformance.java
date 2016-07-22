@@ -106,8 +106,8 @@ public class ProducerPerformance {
             for (ProducerPerformanceThread t : producerPerformanceThreads)
                 t.join();
             producer.flush();
-            stats.printTotal();
             metricStats.printMetricStats();
+            stats.printTotal();
             /* print final results */
             producer.close();
         } catch (ArgumentParserException e) {
