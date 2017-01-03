@@ -76,11 +76,8 @@ public class ProducerPerformance {
                         throw new IllegalArgumentException("Invalid property: " + prop);
                     props.setProperty(pieces[0], pieces[1]);
                 }
-            if (valueBound < 0)
+            if (valueBound <= 0)
                 throw new IllegalArgumentException("The value bound must be greater than 0");
-            String compressionType = props.getProperty(ProducerConfig.COMPRESSION_TYPE_CONFIG);
-            if (compressionType != null && !compressionType.equals("none") && valueBound == 0)
-                throw new IllegalArgumentException("Value bound must be specified when compression is used.");
 
             props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer");
             props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer");
@@ -173,7 +170,7 @@ public class ProducerPerformance {
                 .required(false)
                 .type(Integer.class)
                 .metavar("VALUE-BOUND")
-                .setDefault(0)
+                .setDefault(26)
                 .dest("valueBound")
                 .help("The value bound of the random integers in message payload to simulate different compression ratio.");
 
