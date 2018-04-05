@@ -3,9 +3,9 @@
  * file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file
  * to You under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the
  * License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
  * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
  * specific language governing permissions and limitations under the License.
@@ -129,6 +129,10 @@ public class MemoryRecords extends AbstractRecords {
         ByteBufferOutputStream bufferOutputStream = new ByteBufferOutputStream(destinationBuffer);
 
         for (ByteBufferLogEntry shallowEntry : fromShallowEntries) {
+            if (!filter.canBeFilteredTo(shallowEntry)) {
+                return new FilterResult(destinationBuffer, false, messagesRead, bytesRead, messagesRetained, bytesRetained,
+                    shallowEntry.firstOffset(), maxOffset, maxTimestamp, shallowOffsetOfMaxTimestamp);
+            }
             bytesRead += shallowEntry.sizeInBytes();
 
             // We use the absolute offset to decide whether to retain the message or not (this is handled by the
@@ -204,12 +208,12 @@ public class MemoryRecords extends AbstractRecords {
             // avoid the need for additional allocations.
             ByteBuffer outputBuffer = bufferOutputStream.buffer();
             if (outputBuffer != destinationBuffer)
-                return new FilterResult(outputBuffer, messagesRead, bytesRead, messagesRetained, bytesRetained,
-                    maxOffset, maxTimestamp, shallowOffsetOfMaxTimestamp);
+                return new FilterResult(outputBuffer, false, messagesRead, bytesRead, messagesRetained, bytesRetained,
+                    maxOffset + 1, maxOffset, maxTimestamp, shallowOffsetOfMaxTimestamp);
         }
 
-        return new FilterResult(destinationBuffer, messagesRead, bytesRead, messagesRetained, bytesRetained,
-                maxOffset, maxTimestamp, shallowOffsetOfMaxTimestamp);
+        return new FilterResult(destinationBuffer, true, messagesRead, bytesRead, messagesRetained, bytesRetained,
+                       maxOffset + 1, maxOffset, maxTimestamp, shallowOffsetOfMaxTimestamp);
     }
 
     /**
@@ -289,32 +293,43 @@ public class MemoryRecords extends AbstractRecords {
     }
 
     public interface LogEntryFilter {
+        // Hotfix: LIKAFKA-13793
+        boolean canBeFilteredTo(LogEntry entry);
         boolean shouldRetain(LogEntry entry);
     }
 
     public static class FilterResult {
+        public final boolean filteredAll; //Hotfix:
         public final ByteBuffer output;
         public final int messagesRead;
         public final int bytesRead;
         public final int messagesRetained;
         public final int bytesRetained;
+        // Hotfix: LIKAFKA-13793. This offset is used if we are hitting a message whose offset is too large.
+        // The nextOffset in this case will be the base offset of the next segment that could hold that message.
+        // It is not necessarily the same as maxOffset+1.
+        public final long nextOffset;
         public final long maxOffset;
         public final long maxTimestamp;
         public final long shallowOffsetOfMaxTimestamp;
 
         public FilterResult(ByteBuffer output,
+                            boolean filteredAll,
                             int messagesRead,
                             int bytesRead,
                             int messagesRetained,
                             int bytesRetained,
+                            long nextOffset,
                             long maxOffset,
                             long maxTimestamp,
                             long shallowOffsetOfMaxTimestamp) {
             this.output = output;
+            this.filteredAll = filteredAll;
             this.messagesRead = messagesRead;
             this.bytesRead = bytesRead;
             this.messagesRetained = messagesRetained;
             this.bytesRetained = bytesRetained;
+            this.nextOffset = nextOffset;
             this.maxOffset = maxOffset;
             this.maxTimestamp = maxTimestamp;
             this.shallowOffsetOfMaxTimestamp = shallowOffsetOfMaxTimestamp;

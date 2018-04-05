@@ -110,7 +110,8 @@ class Log(@volatile var dir: File,
   @volatile private var nextOffsetMetadata: LogOffsetMetadata = _
 
   /* the actual segments of the log */
-  private val segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
+  // Hotfix: LIKAFKA-13793. Change val to volatile var to achieve read safety when swapping in multiple segments.
+  @volatile private var segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
   locally {
     val startMs = time.milliseconds
 
@@ -159,6 +160,7 @@ class Log(@volatile var dir: File,
     // create the log directory if it doesn't exist
     dir.mkdirs()
     var swapFiles = Set[File]()
+    var firstCleanedOffset = Long.MaxValue //Hotfix: LIKAFKA-13793
 
     // first do a pass through the files in the log directory and remove any temporary files
     // and find any interrupted swap operations
@@ -167,6 +169,18 @@ class Log(@volatile var dir: File,
         throw new IOException("Could not read file " + file)
       val filename = file.getName
       if(filename.endsWith(DeletedFileSuffix) || filename.endsWith(CleanedFileSuffix)) {
+        // Hotfix: remember the base offset of the .cleaned file. This is needed because we may potentially
+        // clean a group into two segments. The suffix change is no longer atomic in that case. For example,
+        // if a single segment 0.log is cleaned into 0.log.cleaned and 3000000000.log.cleaned, during the log segment
+        // replacement, we will rename the log files to 3000000000.log.swap and 0.log.swap in this order.
+        // If the broker crashes after renaming the 3000000000.log.cleaned to 3000000000.log.swap, but before it
+        // renames the 0.log.cleaned to 0.log.swap, we need to delete both log segments instead of having both the
+        // original 0.log (which may contain offset 3000000000 due to the bug this hotfix patch is trying to resolve)
+        // and the cleaned segment 3000000000.log.
+        // As a summary, unless we don't see .cleaned file at all but only see .swap file, we will always delete
+        // both .swap files and .cleaned files.
+        if (filename.endsWith(CleanedFileSuffix))
+          firstCleanedOffset = Math.min(offsetFromFileName(filename), firstCleanedOffset)
         // if the file ends in .deleted or .cleaned, delete it
         file.delete()
       } else if(filename.endsWith(SwapFileSuffix)) {
@@ -184,6 +198,11 @@ class Log(@volatile var dir: File,
         }
       }
     }
+
+    // Hotfix: delete all the .swap files if their offsets is greater than the deleted .cleaned file.
+    val (invalidSwapFiles, validSwapFiles) = 
+      swapFiles.partition(swapFile => offsetFromFileName(swapFile.getName) >= firstCleanedOffset)
+    invalidSwapFiles.foreach(_.delete())
 
     // now do a second pass and load all the .log and all index files
     for(file <- dir.listFiles if file.isFile) {
@@ -242,7 +261,7 @@ class Log(@volatile var dir: File,
     // Finally, complete any interrupted swap operations. To be crash-safe,
     // log files that are replaced by the swap segment should be renamed to .deleted
     // before the swap file is restored as the new segment file.
-    for (swapFile <- swapFiles) {
+    for (swapFile <- validSwapFiles) {
       val logFile = new File(CoreUtils.replaceSuffix(swapFile.getPath, SwapFileSuffix, ""))
       val fileName = logFile.getName
       val startOffset = fileName.substring(0, fileName.length - LogFileSuffix.length).toLong
@@ -260,7 +279,7 @@ class Log(@volatile var dir: File,
       info("Found log file %s from interrupted swap operation, repairing.".format(swapFile.getPath))
       swapSegment.recover(config.maxMessageSize)
       val oldSegments = logSegments(swapSegment.baseOffset, swapSegment.nextOffset)
-      replaceSegments(swapSegment, oldSegments.toSeq, isRecoveredSwapFile = true)
+      replaceSegments(Seq(swapSegment), oldSegments.toSeq, isRecoveredSwapFile = true)
     }
 
     if(logSegments.isEmpty) {
@@ -282,6 +301,11 @@ class Log(@volatile var dir: File,
         activeSegment.timeIndex.resize(config.maxIndexSize)
       }
     }
+  }
+
+  //Hotfix: LIKAFKA-13793
+  private def offsetFromFileName(filename: String) : Long = {
+    filename.substring(0, filename.indexOf('.')).toLong
   }
 
   private def updateLogEndOffset(messageOffset: Long) {
@@ -547,7 +571,8 @@ class Log(@volatile var dir: File,
    */
   def read(startOffset: Long, maxLength: Int, maxOffset: Option[Long] = None, minOneMessage: Boolean = false): FetchDataInfo = {
     trace("Reading %d bytes from offset %d in log %s of length %d bytes".format(maxLength, startOffset, name, size))
-
+    // Hotfix: LIKAFKA-13793
+    val segments = this.segments
     // Because we don't use lock for reading, the synchronization is a little bit tricky.
     // We create the local variables to avoid race conditions with updates to the log.
     val currentNextOffsetMetadata = nextOffsetMetadata
@@ -1007,28 +1032,36 @@ class Log(@volatile var dir: File,
    *        on recovery in loadSegments().
    * </ol>
    *
-   * @param newSegment The new log segment to add to the log
+   * @param newSegments The new log segment to add to the log
    * @param oldSegments The old log segments to delete from the log
    * @param isRecoveredSwapFile true if the new segment was created from a swap file during recovery after a crash
    */
-  private[log] def replaceSegments(newSegment: LogSegment, oldSegments: Seq[LogSegment], isRecoveredSwapFile : Boolean = false) {
+  //Hotfix: LIKAFKA-13793
+  private[log] def replaceSegments(newSegments: Seq[LogSegment], oldSegments: Seq[LogSegment], isRecoveredSwapFile : Boolean = false) {
     lock synchronized {
       // need to do this in two phases to be crash safe AND do the delete asynchronously
       // if we crash in the middle of this we complete the swap in loadSegments()
+      // Hotfix: LIKAFKA-13793. We need to reverse the order so the segment with base offset is the last one to be
+      // renamed. This is needed to ensure the swap is still atomic to crash even when there are more than one new 
+      // segment to be swapped in. See more in loadSegments()
       if (!isRecoveredSwapFile)
-        newSegment.changeFileSuffixes(Log.CleanedFileSuffix, Log.SwapFileSuffix)
-      addSegment(newSegment)
+        newSegments.reverse.foreach(seg => seg.changeFileSuffixes(Log.CleanedFileSuffix, Log.SwapFileSuffix))
+      if (newSegments.size == 1) {
+        addSegment(newSegments.head)
+      } else {
+        addSegments(newSegments)
+      }
 
       // delete the old files
       for(seg <- oldSegments) {
         // remove the index entry
-        if(seg.baseOffset != newSegment.baseOffset)
+        if(seg.baseOffset != newSegments.head.baseOffset)
           segments.remove(seg.baseOffset)
         // delete segment
         asyncDeleteSegment(seg)
       }
       // okay we are safe now, remove the swap suffix
-      newSegment.changeFileSuffixes(Log.SwapFileSuffix, "")
+      newSegments.foreach(seg => seg.changeFileSuffixes(Log.SwapFileSuffix, ""))
     }
   }
 
@@ -1047,6 +1080,17 @@ class Log(@volatile var dir: File,
    * @param segment The segment to add
    */
   def addSegment(segment: LogSegment) = this.segments.put(segment.baseOffset, segment)
+
+  /**
+    * Hotfix: LIKAFKA-13793
+    * This method is ensure that we still have atomicity when swapping in multiple cleaned log segments.
+    */
+  def addSegments(segments: Seq[LogSegment]) {
+    val copyOnWriteSegments = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
+    copyOnWriteSegments.putAll(this.segments)
+    copyOnWriteSegments.putAll(segments.map(seg => Long.box(seg.baseOffset) -> seg).toMap.asJava)
+    this.segments = copyOnWriteSegments
+  }
 
 }
 

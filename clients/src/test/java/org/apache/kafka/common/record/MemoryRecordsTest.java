@@ -275,6 +275,11 @@ public class MemoryRecordsTest {
 
     private static class RetainNonNullKeysFilter implements MemoryRecords.LogEntryFilter {
         @Override
+        public boolean canBeFilteredTo(LogEntry entry) {
+            return true;
+        }
+
+        @Override
         public boolean shouldRetain(LogEntry entry) {
             return entry.record().hasKey();
         }
